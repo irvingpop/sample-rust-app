@@ -1,0 +1,13 @@
+{
+	"image": "mcr.microsoft.com/vscode/devcontainers/rust:latest",
+	"features": {
+		"ghcr.io/devcontainers/features/rust:1": {}
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"1YiB.rust-bundle"
+			]
+		}
+	}
+}
