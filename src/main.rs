@@ -1,16 +1,24 @@
-#![warn(rust_2018_idioms)]
-
 use opentelemetry::global::shutdown_tracer_provider;
-use opentelemetry::sdk::Resource;
+use opentelemetry_sdk::Resource;
 use opentelemetry::trace::TraceError;
-use opentelemetry::{global, sdk::trace as sdktrace};
-use opentelemetry::{trace::Tracer};
-use opentelemetry_otlp::WithExportConfig;
+// use opentelemetry::trace::SpanKind::Server;
+use opentelemetry::global;
+use opentelemetry_sdk::trace as sdktrace;
+use opentelemetry::trace::Tracer;
+// use opentelemetry_otlp::WithExportConfig;
+use tokio::net::TcpListener;
+
 use std::error::Error;
+use std::convert::Infallible;
+use std::net::SocketAddr;
 
-use hyper::{body::Body, Method, Request, Response, Server, StatusCode};
+use hyper::{body::Body, Method, Request, Response, StatusCode};
+use http_body_util::Full;
+use hyper::server::conn::http1;
 
-use hyper::service::{make_service_fn, service_fn};
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use hyper::body::Bytes;
 
 use opentelemetry_http::HeaderExtractor;
 use std::collections::HashMap;
@@ -28,8 +36,11 @@ fn fibonacci(n: u8) -> u64 {
     }
 }
 
-// Using service_fn, we can turn this function into a `Service`.
-async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+async fn hello(_: Request<impl hyper::body::Body>) -> Result<Response<Full<Bytes>>, Infallible> {
+    Ok(Response::new(Full::new(Bytes::from("Hello World!"))))
+}
+
+async fn handle(req: Request<impl hyper::body::Body>) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let tracer = global::tracer("global_tracer");
 
     match (req.method(), req.uri().path()) {
@@ -42,7 +53,7 @@ async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
             tracer.start_with_context("fibonacci", &parent_cx);
 
             // Concatenate the body...
-            let b = hyper::body::to_bytes(req).await?;
+            let b = http_body_util::BodyExt::collect(req).await?;
             // Parse the request body. form_urlencoded::parse
             // always succeeds, but in general parsing may
             // fail (for example, an invalid post of json), so
@@ -132,29 +143,48 @@ async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
 fn init_tracer() -> Result<sdktrace::Tracer, TraceError> {
     opentelemetry_otlp::new_pipeline()
         .tracing()
-        .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_env())
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
         .with_trace_config(
             sdktrace::config().with_resource(Resource::default()),
         )
-        .install_batch(opentelemetry::runtime::Tokio)
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     let _ = init_tracer()?;
 
-    let addr = ([127, 0, 0, 1], 1337).into();
+    let addr: SocketAddr = ([127, 0, 0, 1], 1337).into();
 
-    let server = Server::bind(&addr).serve(make_service_fn(|_| async {
-        Ok::<_, hyper::Error>(service_fn(handle))
-    }));
-
+    let listener = TcpListener::bind(&addr).await?;
     println!("Listening on {}", addr);
-    if let Err(e) = server.await {
-        eprintln!("server error: {}", e);
-    }
+    loop {
+        // When an incoming TCP connection is received grab a TCP stream for
+        // client<->server communication.
+        //
+        // Note, this is a .await point, this loop will loop forever but is not a busy loop. The
+        // .await point allows the Tokio runtime to pull the task off of the thread until the task
+        // has work to do. In this case, a connection arrives on the port we are listening on and
+        // the task is woken up, at which point the task is then put back on a thread, and is
+        // driven forward by the runtime, eventually yielding a TCP stream.
+        let (tcp, _) = listener.accept().await?;
+        // Use an adapter to access something implementing `tokio::io` traits as if they implement
+        // `hyper::rt` IO traits.
+        let io = TokioIo::new(tcp);
 
+        // Spin up a new task in Tokio so we can continue to listen for new TCP connection on the
+        // current task without waiting for the processing of the HTTP1 connection we just received
+        // to finish
+        tokio::task::spawn(async move {
+            // Handle the connection from the client using HTTP1 and pass any
+            // HTTP requests received on that connection to the `hello` function
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(io, service_fn(hello))
+                .await
+            {
+                println!("Error serving connection: {:?}", err);
+            }
+        });
     shutdown_tracer_provider();
-
-    Ok(())
+    }
 }
