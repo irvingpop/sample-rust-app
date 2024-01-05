@@ -1,11 +1,11 @@
 #![warn(rust_2018_idioms)]
 
 use opentelemetry::global::shutdown_tracer_provider;
-use opentelemetry::sdk::Resource;
+use opentelemetry_sdk::Resource;
 use opentelemetry::trace::TraceError;
-use opentelemetry::{global, sdk::trace as sdktrace};
-use opentelemetry::{trace::Tracer};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry::{global, trace::Tracer};
+use opentelemetry_sdk::trace as sdktrace;
+// use opentelemetry_otlp::WithExportConfig;
 use std::error::Error;
 
 use hyper::{body::Body, Method, Request, Response, Server, StatusCode};
@@ -132,11 +132,11 @@ async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
 fn init_tracer() -> Result<sdktrace::Tracer, TraceError> {
     opentelemetry_otlp::new_pipeline()
         .tracing()
-        .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_env())
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
         .with_trace_config(
             sdktrace::config().with_resource(Resource::default()),
         )
-        .install_batch(opentelemetry::runtime::Tokio)
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
 }
 
 #[tokio::main]
